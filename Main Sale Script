@@ -1,0 +1,163 @@
+rust
+use anchor_lang::prelude::*;
+
+declare_id!("Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS");
+
+#[program]
+pub mod asset_sale {
+    use super::*;
+
+    pub fn initialize(ctx: Context<Initialize>, buyer: Pubkey, asset_price: u64) -> Result<()> {
+        let asset_sale = &mut ctx.accounts.asset_sale;
+        asset_sale.seller = ctx.accounts.payer.key();
+        asset_sale.buyer = buyer;
+        asset_sale.asset_price = asset_price;
+        asset_sale.state = State::Created;
+        Ok(())
+    }
+
+    pub fn confirm_sale_as_seller(ctx: Context<ConfirmSaleAsSeller>) -> Result<()> {
+        require!(ctx.accounts.asset_sale.state == State::Created, AssetSaleError::InvalidState);
+        ctx.accounts.asset_sale.state = State::SellerConfirmed;
+        Ok(())
+    }
+
+    pub fn confirm_sale_as_buyer(ctx: Context<ConfirmSaleAsBuyer>) -> Result<()> {
+        require!(ctx.accounts.asset_sale.state == State::SellerConfirmed, AssetSaleError::InvalidState);
+        ctx.accounts.asset_sale.state = State::BuyerConfirmed;
+        Ok(())
+    }
+
+    pub fn complete_sale(ctx: Context<CompleteSale>) -> Result<()> {
+        require!(ctx.accounts.asset_sale.state == State::BuyerConfirmed, AssetSaleError::InvalidState);
+        ctx.accounts.asset_sale.state = State::Completed;
+        let seeds = &[b"asset-sale".as_ref(), &[ctx.accounts.asset_sale.bump]];
+        let signer = &[&seeds[..]];
+        anchor_lang::solana_program::program::invoke_signed(
+            &anchor_lang::solana_program::system_instruction::transfer(
+                &ctx.accounts.asset_sale.to_account_info().key(),
+                &ctx.accounts.seller.key(),
+                ctx.accounts.asset_sale.asset_price,
+            ),
+            &[
+                ctx.accounts.asset_sale.to_account_info(),
+                ctx.accounts.seller.to_account_info(),
+            ],
+            &signer,
+        )?;
+        // Transfer asset ownership to the buyer (implementation depends on the asset type)
+        Ok(())
+    }
+
+    pub fn initiate_cancellation(ctx: Context<InitiateCancellation>) -> Result<()> {
+        require!(ctx.accounts.asset_sale.state != State::Completed, AssetSaleError::SaleCompleted);
+        ctx.accounts.asset_sale.state = State::CancellationPending;
+        Ok(())
+    }
+
+    pub fn confirm_cancellation_as_seller(ctx: Context<ConfirmCancellationAsSeller>) -> Result<()> {
+        require!(ctx.accounts.asset_sale.state == State::CancellationPending, AssetSaleError::InvalidState);
+        ctx.accounts.asset_sale.state = State::Created;
+        anchor_lang::solana_program::program::invoke(
+            &anchor_lang::solana_program::system_instruction::transfer(
+                &ctx.accounts.asset_sale.to_account_info().key(),
+                &ctx.accounts.buyer.key(),
+                ctx.accounts.asset_sale.asset_price,
+            ),
+            &[
+                ctx.accounts.asset_sale.to_account_info(),
+                ctx.accounts.buyer.to_account_info(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn confirm_cancellation_as_buyer(ctx: Context<ConfirmCancellationAsBuyer>) -> Result<()> {
+        require!(ctx.accounts.asset_sale.state == State::CancellationPending, AssetSaleError::InvalidState);
+        ctx.accounts.asset_sale.state = State::Created;
+        Ok(())
+    }
+}
+
+#[derive(Accounts)]
+pub struct Initialize<'info> {
+    #[account(init, payer = payer, space = 8 + 32 + 32 + 8 + 1)]
+    pub asset_sale: Account<'info, AssetSale>,
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct ConfirmSaleAsSeller<'info> {
+    #[account(mut)]
+    pub asset_sale: Account<'info, AssetSale>,
+    pub seller: Signer<'info>,
+}
+
+#[derive(Accounts)]
+pub struct ConfirmSaleAsBuyer<'info> {
+    #[account(mut)]
+    pub asset_sale: Account<'info, AssetSale>,
+    #[account(mut)]
+    pub buyer: Signer<'info>,
+}
+
+#[derive(Accounts)]
+pub struct CompleteSale<'info> {
+    #[account(mut)]
+    pub asset_sale: Account<'info, AssetSale>,
+    #[account(mut)]
+    pub seller: SystemAccount<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct InitiateCancellation<'info> {
+    #[account(mut)]
+    pub asset_sale: Account<'info, AssetSale>,
+    pub initiator: Signer<'info>,
+}
+
+#[derive(Accounts)]
+pub struct ConfirmCancellationAsSeller<'info> {
+    #[account(mut)]
+    pub asset_sale: Account<'info, AssetSale>,
+    #[account(mut)]
+    pub buyer: SystemAccount<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct ConfirmCancellationAsBuyer<'info> {
+    #[account(mut)]
+    pub asset_sale: Account<'info, AssetSale>,
+    #[account(mut)]
+    pub buyer: Signer<'info>,
+}
+
+#[account]
+pub struct AssetSale {
+    pub seller: Pubkey,
+    pub buyer: Pubkey,
+    pub asset_price: u64,
+    pub state: State,
+    pub bump: u8,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq, Eq)]
+pub enum State {
+    Created,
+    SellerConfirmed,
+    BuyerConfirmed,
+    Completed,
+    CancellationPending,
+}
+
+#[error_code]
+pub enum AssetSaleError {
+    #[msg("Invalid state for the requested operation")]
+    InvalidState,
+    #[msg("Sale has already been completed")]
+    SaleCompleted,
+}
